@@ -46,7 +46,7 @@ class Controller(Node):
         self.declare_parameter('collision_tol', 0.2)     # metres
         self.declare_parameter('linear_velocity', 0.2)   # constant forward speed, m/s
         self.declare_parameter('lidar_max_range', 5.0)
-        self.declare_parameter('max_steps', 19800)       # 10 min * 60 s * 33 Hz
+        self.declare_parameter('max_steps', 19800)       # test length, one step per LiDAR scan
         self.declare_parameter('model_path', str(DEFAULT_WS / 'models' / 'best_model.keras'))
         self.declare_parameter('log_dir', str(DEFAULT_WS / 'logs'))
 
@@ -100,8 +100,7 @@ class Controller(Node):
         self.state = None
 
         self.get_logger().info(
-            f'Controller initialised in TEST mode: '
-            f'max_steps={self.max_steps} (~{self.max_steps / 33 / 60:.1f} min)'
+            f'Controller initialised in TEST mode: max_steps={self.max_steps}'
         )
 
     def scan_callback(self, msg: Float32MultiArray):

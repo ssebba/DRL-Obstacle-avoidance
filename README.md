@@ -9,10 +9,10 @@ instead of reacting only to obstacles inside a fixed trigger distance (as potent
 > Developed for the Robotics course at Politecnico di Torino. The robot here is a TurtleBot3 Burger simulated in Gazebo, while the paper uses the STORM tracked platform.
 
 <p align="center">
-  <img src="media/unseen_map.jpg" alt="Top view of the unseen test map in Gazebo" height="300">
-  <img src="media/unseen_trajectory.jpg" alt="Odometry trajectory of the robot through the unseen map, shown in PlotJuggler" height="300">
+  <img src="media/training.gif" alt="Early training in Gazebo: the robot crashes into walls and respawns at a random free pose" width="400">
+  <img src="media/trained_model.gif" alt="Trained model driving through the training map, leaving a trajectory, without collisions" width="400">
 </p>
-<p align="center"><em>Navigation through a map not used for training: top view in Gazebo (left) and recorded odometry (right).</em></p>
+<p align="center"><em>Left: start of training, when the robot crashes often and respawns at a random free pose. Right: the trained model during a collision-free stretch of a longer run. Gazebo footage, sped up, with the trajectory and LiDAR rays drawn on top.</em></p>
 
 ## Highlights
 
@@ -23,7 +23,7 @@ instead of reacting only to obstacles inside a fixed trigger distance (as potent
   - Gradient steps run on a background thread, so training does not block the ROS callback loop.
   - Best-model checkpointing on the smoothed episode reward, early stopping, and crash-safe resumable checkpoints.
 - **Automated episode reset**: a respawner node parses the Gazebo world/mesh geometry, precomputes collision-free poses, and teleports the robot with a heading that guarantees forward clearance.
-- **Reproducible evaluation**: the test controller logs every step (min distance, action, ω) to CSV and counts collisions over a fixed 10-minute run.
+- **Reproducible evaluation**: the test controller logs every step (min distance, action, ω) to CSV and counts collisions over a fixed 19800-step run.
 
 ## Results
 
@@ -33,7 +33,7 @@ The published model is [`models/best_model.keras`](models/best_model.keras): the
 
 ### Reward shaping
 
-The paper's reward is constant while the robot survives, so nothing discourages it from driving close to walls. The shaped reward keeps it further away. In a 10-minute run (19800 steps) on the training map, the published model compared with a paper-like baseline as follows:
+The paper's reward is constant while the robot survives, so nothing discourages it from driving close to walls. The shaped reward keeps it further away. In a 19800-step run on the training map, the published model compared with a paper-like baseline as follows:
 
 | Model | Collisions | Mean minimum LiDAR distance |
 |---|---|---|
@@ -49,18 +49,25 @@ These are single runs, so they are indicative rather than statistically signific
 
 ### Map not used for training
 
-<!-- UNSEEN_MAP_RESULTS -->
+To check the policy outside its training map, the robot starts at the entrance of a maze it has never seen. The maze ends in a dead end too narrow to turn around in, so a collision at the end is expected and this map is not used to count collisions.
+
+The recorded run below reaches the end after about 22 m with no earlier collision, and a rerun of the published model hit the end wall at the same point. Another rerun collided earlier, after about 11 m, so the result is not guaranteed on every run.
+
+<p align="center">
+  <img src="media/unseen_map.jpg" alt="Top view of the unseen maze in Gazebo" height="300">
+  <img src="media/unseen_trajectory.jpg" alt="Odometry trajectory of the robot through the unseen maze, shown in PlotJuggler" height="300">
+</p>
 
 ## Method
 
 | | |
 |---|---|
-| **State** | 50 LiDAR ranges, clipped to 5 m and normalised to [0, 1] |
+| **State** | 50 evenly spaced ranges from a 360-beam LiDAR (5 Hz, 3.5 m range in simulation), divided by 5 m |
 | **Actions** | 11 discrete angular velocities, ω<sub>m</sub> = −0.8 + 0.16·m rad/s, at constant v = 0.2 m/s |
 | **Network** | MLP 50 → 300 → 300 → 11 (ReLU), Adam, lr = 1e-3 |
 | **Algorithm** | Double DQN, replay buffer 100k, batch 256, γ = 0.99, hard target update every 1000 env steps |
 | **Exploration** | ε-greedy, ε<sub>k+1</sub> = 0.9996·ε<sub>k</sub> per episode, ε<sub>min</sub> = 0.05 |
-| **Reward** | +5 per step, −1000 on collision (< 0.2 m), −20·e<sup>−4d/0.1</sup> when d < 0.1, +2·d clearance bonus, where d is the minimum range normalised to [0, 1] (d = 0.1 is 0.5 m) |
+| **Reward** | +5 per step, −1000 on collision (< 0.2 m), −20·e<sup>−4d/0.1</sup> when d < 0.1, +2·d clearance bonus, where d is the normalised minimum range (d = 0.1 is 0.5 m) |
 
 DDQN target: the online network selects the next action and the target network evaluates it,
 y = r + γ · Q<sub>θ⁻</sub>(s′, argmax<sub>a</sub> Q<sub>θ</sub>(s′, a)).
@@ -179,7 +186,7 @@ ros2 launch oa_drl_control testing.launch.py world_file:=unseen_env.world x_pose
 ros2 run oa_drl_control controller
 ```
 
-The launch file also starts the respawner, so the robot restarts from a random free pose after a collision. Add `gui:=false` to run without the Gazebo client. Each run lasts 19800 steps, which is 10 minutes of simulated time at the 33 Hz LiDAR rate. It writes a CSV log to `~/ros_ws/logs` (parameter `log_dir`) and prints the collision count at the end. Use the `model_path` parameter to test another model.
+The launch file also starts the respawner, so the robot restarts from a random free pose after a collision. Add `gui:=false` to run without the Gazebo client. Each run lasts 19800 control steps, one per LiDAR scan. It writes a CSV log to `~/ros_ws/logs` (parameter `log_dir`) and prints the collision count at the end. Use the `model_path` parameter to test another model.
 
 ## Reference
 
