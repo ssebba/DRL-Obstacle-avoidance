@@ -1,20 +1,30 @@
-import rclpy
-from rclpy.node import Node
-from sensor_msgs.msg import LaserScan
-from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Twist
-import numpy as np
-import csv
-import time
-from std_msgs.msg import Float32
-from std_msgs.msg import Float32MultiArray
-from std_srvs.srv import Trigger, Empty
-from rclpy.qos import qos_profile_sensor_data
+#!/usr/bin/env python3
+"""
+Test-time controller for DRL-based collision avoidance.
 
+Loads a trained Q-network and drives the robot with a greedy policy:
+at every pre-processed LiDAR scan it picks the action with the highest
+Q-value and maps it to an angular velocity (paper §3.4). Collisions
+trigger a respawn, and every step is logged to CSV for evaluation.
+"""
+
+import csv
 import os
+import time
+from pathlib import Path
+
+import numpy as np
+import rclpy
+from geometry_msgs.msg import Twist
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from std_msgs.msg import Float32, Float32MultiArray
+from std_srvs.srv import Empty, Trigger
+
 os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'] = 'python'
-import tensorflow as tf
-# Limit use of GPU to avoid crashes
+import tensorflow as tf  # noqa: E402  (must follow the protobuf env var)
+
+# Allow GPU memory growth to avoid OOM crashes
 gpus = tf.config.list_physical_devices('GPU')
 if gpus:
     try:
@@ -23,21 +33,29 @@ if gpus:
     except RuntimeError as e:
         print(e)
 
+DEFAULT_WS = Path.home() / 'ros_ws'
+
 
 class Controller(Node):
+    """Greedy policy runner for a trained DDQN obstacle-avoidance model."""
+
     def __init__(self):
         super().__init__('controller')
-        
+
         # Node parameters
-        self.declare_parameter('collision_tol', 0.2)  # 15-25 cm
-        self.declare_parameter('linear_velocity',0.2) # define constant linear speed
-        self.declare_parameter('lidar_max_range',5.0)
-        self.declare_parameter('max_steps', 19800)  # 10 min * 60 s * 33 Hz
+        self.declare_parameter('collision_tol', 0.2)     # metres
+        self.declare_parameter('linear_velocity', 0.2)   # constant forward speed, m/s
+        self.declare_parameter('lidar_max_range', 5.0)
+        self.declare_parameter('max_steps', 19800)       # 10 min * 60 s * 33 Hz
+        self.declare_parameter('model_path', str(DEFAULT_WS / 'models' / 'best_model.keras'))
+        self.declare_parameter('log_dir', str(DEFAULT_WS / 'logs'))
 
         self.lidar_max_range = self.get_parameter('lidar_max_range').value
-        self.collision_tol = self.get_parameter('collision_tol').value/self.lidar_max_range
+        self.collision_tol = self.get_parameter('collision_tol').value / self.lidar_max_range
         self.linear_velocity = self.get_parameter('linear_velocity').value
         self.max_steps = self.get_parameter('max_steps').value
+        model_path = os.path.expanduser(self.get_parameter('model_path').value)
+        log_dir = os.path.expanduser(self.get_parameter('log_dir').value)
 
         # Subscribers
         self.scan_subscription = self.create_subscription(
@@ -46,27 +64,10 @@ class Controller(Node):
             self.scan_callback,
             qos_profile_sensor_data
         )
-        
-        # self.odom_subscription = self.create_subscription(
-        #     Odometry,
-        #     '/odom',
-        #     self.odom_callback,
-        #     10
-        # )
-        
-        # Publisher
-        self.cmd_vel_publisher = self.create_publisher(
-            Twist,
-            '/cmd_vel',
-            10
-        )
 
-        self.min_dist_publisher = self.create_publisher(
-            Float32,
-            '/min_lidar_distance',
-            10
-        )
-
+        # Publishers
+        self.cmd_vel_publisher = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.min_dist_publisher = self.create_publisher(Float32, '/min_lidar_distance', 10)
 
         # Service clients
         self.respawn_client = self.create_client(Trigger, '/randomize_robot_pose')
@@ -81,30 +82,30 @@ class Controller(Node):
 
         # CSV logging
         timestamp = time.strftime('%Y%m%d_%H%M%S')
-        self.csv_path = f'/home/seba/ros_ws/logs/test_{timestamp}.csv'
-        os.makedirs(os.path.dirname(self.csv_path), exist_ok=True)
+        self.csv_path = os.path.join(log_dir, f'test_{timestamp}.csv')
+        os.makedirs(log_dir, exist_ok=True)
         self.csv_file = open(self.csv_path, 'w', newline='')
         self.csv_writer = csv.writer(self.csv_file)
         self.csv_writer.writerow(['step', 'min_distance_m', 'action', 'omega'])
-        self.get_logger().info(f'Logging CSV su: {self.csv_path}')
+        self.get_logger().info(f'Logging CSV to: {self.csv_path}')
 
-        # load trained model
-        #self.model = tf.keras.models.load_model('/home/seba/ros_ws/models/best_model_31_05.keras', compile=False)
-        self.model = tf.keras.models.load_model('/home/seba/ros_ws/models/best_model_04_06.keras', compile=False)
+        # Load trained model
+        self.get_logger().info(f'Loading model: {model_path}')
+        self.model = tf.keras.models.load_model(model_path, compile=False)
 
         self.navigation_active = True
         self.stop_flag = False
         self.is_resetting = False
         self.skip_lidar_scans = 0
         self.state = None
-        
+
         self.get_logger().info(
-            f'Controller inizializzato in modalità TEST: '
-            f'max_steps={self.max_steps} (~{self.max_steps/33/60:.1f} min)'
+            f'Controller initialised in TEST mode: '
+            f'max_steps={self.max_steps} (~{self.max_steps / 33 / 60:.1f} min)'
         )
-    
+
     def scan_callback(self, msg: Float32MultiArray):
-        """Callback for LiDAR readings"""
+        """Receive pre-processed LiDAR data and trigger the control loop."""
         if self.skip_lidar_scans > 0:
             self.skip_lidar_scans -= 1
             return
@@ -114,131 +115,91 @@ class Controller(Node):
         self.state = np.array(msg.data) / self.lidar_max_range
         self.state = self.state.reshape(1, len(self.state))
         self.control_loop_callback()
-    
-    # def odom_callback(self, msg: Odometry):
-    #     """Callback for robot odometry"""
-    #     # Extract position
-    #     x = msg.pose.pose.position.x
-    #     y = msg.pose.pose.position.y
-        
-    #     # Extract orientation (quaternione -> euler)
-    #     quat = msg.pose.pose.orientation
-    #     _, _, theta = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
-        
-    #     self.robot_pose = np.array([x, y, theta])
-        
-    #     # Estrai velocità
-    #     v = msg.twist.twist.linear.x
-    #     w = msg.twist.twist.angular.z
-    #     self.robot_vel = np.array([v, w])
-    
-    
-    def check_collision(self, distances) -> bool:
-        """
-        Check if the robot is too close to an obstacle
-        
-        Input: LaserScan message
-        Output: True if the collision is close
-        """
 
+    def check_collision(self, distances) -> bool:
+        """Return True if the nearest normalised range is below the collision threshold."""
         if distances.size == 0:
             return False
-        
-        min_range = np.min(distances)
-        collision_threshold = self.collision_tol
 
-        if min_range < collision_threshold:
-            self.get_logger().warn(f'Collisione rilevata! Min range: {min_range*self.lidar_max_range:.3f}m')
+        min_range = np.min(distances)
+        if min_range < self.collision_tol:
+            self.get_logger().warn(
+                f'Collision detected! Min range: {min_range * self.lidar_max_range:.3f} m')
             self.stop_flag = True
             return True
-        
+
         return False
-        
 
     def respawn_robot(self):
-        """Pause physics, then call /randomize_robot_pose to respawn the robot"""
+        """Pause physics, then call /randomize_robot_pose to respawn the robot."""
         self.is_resetting = True
         self.pause_physics_client.call_async(Empty.Request())
 
         if not self.respawn_client.wait_for_service(timeout_sec=2.0):
-            self.get_logger().error('Servizio /randomize_robot_pose non disponibile!')
+            self.get_logger().error('Service /randomize_robot_pose not available!')
             self.is_resetting = False
             return
-        
-        request = Trigger.Request()
-        future = self.respawn_client.call_async(request)
+
+        future = self.respawn_client.call_async(Trigger.Request())
         future.add_done_callback(self._respawn_done_callback)
 
     def _respawn_done_callback(self, future):
-        """Callback when respawn service call completes"""
+        """Resume navigation once the respawn service call completes."""
         try:
             result = future.result()
             if result.success:
-                self.get_logger().info(f'Respawn riuscito: {result.message}')
+                self.get_logger().info(f'Respawn succeeded: {result.message}')
             else:
-                self.get_logger().warn(f'Respawn fallito: {result.message}')
+                self.get_logger().warn(f'Respawn failed: {result.message}')
         except Exception as e:
-            self.get_logger().error(f'Errore nella chiamata respawn: {e}')
-        
-        # Resume navigation after respawn
+            self.get_logger().error(f'Respawn service call error: {e}')
+
         self.stop_flag = False
         self.state = None
-        self.skip_lidar_scans = 15  # discard stale lidar data after respawn
+        self.skip_lidar_scans = 15  # discard stale LiDAR data after respawn
         self.is_resetting = False
         self.unpause_physics_client.call_async(Empty.Request())
 
     def finish_test(self):
-        """Stop the test and log collision results"""
+        """Stop the test and log collision results."""
         self.stop_robot()
         self.test_finished = True
         self.navigation_active = False
-        # Close CSV
         self.csv_file.close()
         self.get_logger().info('=' * 60)
-        self.get_logger().info('TEST COMPLETATO')
-        self.get_logger().info(f'Step totali: {self.step_count}')
-        self.get_logger().info(f'Collisioni totali: {self.collision_count}')
-        self.get_logger().info(f'CSV salvato in: {self.csv_path}')
+        self.get_logger().info('TEST COMPLETED')
+        self.get_logger().info(f'Total steps: {self.step_count}')
+        self.get_logger().info(f'Total collisions: {self.collision_count}')
+        self.get_logger().info(f'CSV saved to: {self.csv_path}')
         self.get_logger().info('=' * 60)
 
     def control_loop_callback(self):
-        """
-        Callback of the timer for the DWA control loop
-        """
-        
-        if self.state is None:
+        """One greedy control step, invoked once per LiDAR scan."""
+        if self.state is None or self.test_finished or not self.navigation_active:
             return
 
-        if self.test_finished:
-            return
-
-        if not self.navigation_active:
-            return
-        
-        # Check if test duration has been reached
+        # Stop once the test duration has been reached
         if self.step_count >= self.max_steps:
             self.finish_test()
             return
 
-        # 1. Check for collision
+        # 1. Collision check
         if self.check_collision(self.state) or self.stop_flag:
             self.stop_robot()
             self.collision_count += 1
             self.get_logger().warn(
-                f'Collisione #{self.collision_count} allo step {self.step_count}. Respawn in corso...'
-            )
+                f'Collision #{self.collision_count} at step {self.step_count}. Respawning...')
             self.respawn_robot()
             return
-        
+
+        # 2. Greedy policy: index m in [0, 10] of the max Q-value
         q_values = self.model(self.state, training=False).numpy()
-        # 3. Policy Greedy: Seleziona l'azione con il valore Q massimo 
-        # Restituisce l'indice 'm' compreso tra 0 e 10
         m = np.argmax(q_values[0])
 
-        # 4. Calcola la velocità angolare in base all'equazione del paper 
+        # 3. Angular velocity from the discrete action (paper §3.4)
         omega_m = -0.8 + 0.16 * m
-        
-        # 7. CMD VEL PUBBLICATION
+
+        # 4. Publish velocity command
         cmd_msg = Twist()
         cmd_msg.linear.x = self.linear_velocity
         cmd_msg.angular.z = float(omega_m)
@@ -249,29 +210,19 @@ class Controller(Node):
         msg.data = min_distance_meters
         self.min_dist_publisher.publish(msg)
 
-        # CSV logging
-        self.csv_writer.writerow([self.step_count, f'{min_distance_meters:.4f}', m, f'{omega_m:.2f}'])
-        
-        # 8. Periodic feedback
+        # 5. CSV logging and periodic feedback
+        self.csv_writer.writerow(
+            [self.step_count, f'{min_distance_meters:.4f}', m, f'{omega_m:.2f}'])
         if self.step_count % self.feedback_rate == 0:
-            self.csv_file.flush()  # flush periodico per sicurezza
-            self.get_logger().info(
-                f'Step {self.step_count} | '
-            )
-            
-        
+            self.csv_file.flush()
+            self.get_logger().info(f'Step {self.step_count}')
+
         self.step_count += 1
-    
+
     def stop_robot(self):
-        """Stop the robot"""
-        cmd_msg = Twist()
-        cmd_msg.linear.x = 0.0
-        cmd_msg.angular.z = 0.0
-        self.cmd_vel_publisher.publish(cmd_msg)
-        self.get_logger().info('Robot fermato')
-
-
-
+        """Publish a zero-velocity command to halt the robot."""
+        self.cmd_vel_publisher.publish(Twist())
+        self.get_logger().info('Robot stopped')
 
 
 def main(args=None):

@@ -7,12 +7,16 @@ Implements the DDQN algorithm from:
     "A Collision Avoidance Method Based on Deep Reinforcement Learning"
     Robotics 2021, 10, 73.
 
-Enhancements over the baseline (see differences.md):
-  - Synchronous training: one gradient step per env step (paper Algorithm 1)
-  - Correct loss: L = (1/2n) * sum(y_i - Q_i)^2            (paper Eq. 5)
+Implementation notes:
+  - One gradient step per env step (paper Algorithm 1), run on a worker thread
+  - Loss: L = (1/2n) * sum(y_i - Q_i)^2                      (paper Eq. 5)
   - Target network updated every N *environment* steps      (paper Alg. 1 l.16)
-  - Best-model checkpoint: saved when smoothed avg-Q improves, not every N epochs
+  - Shaped reward: exponential proximity penalty + clearance bonus
+  - Best-model checkpoint: saved when the smoothed episode reward improves
   - Early stopping with patience parameter
+
+All artefacts (checkpoints, metadata, training CSV) are written to
+$OA_DRL_MODELS_DIR, defaulting to ~/ros_ws/models.
 """
 
 import rclpy
@@ -81,6 +85,9 @@ TARGET_UPDATE_FREQ     = 1000   # env steps between target-network updates
 PATIENCE               = 3000     # episodes without reward improvement → early stop
 BEST_MODEL_WINDOW      = 200       # moving-average window for smoothed reward metric
 MEMORY_SIZE            = 100000  # experience replay buffer capacity
+
+# ── Output directory ───────────────────────────────────────────────────────────
+MODELS_DIR = Path(os.environ.get('OA_DRL_MODELS_DIR', Path.home() / 'ros_ws' / 'models'))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -165,8 +172,9 @@ class Trainer(Node):
         self.batch_size         = params['batch_size']
         self.target_update_freq = params['target_update_freq']
 
-        model_path = Path.home() / 'ros_ws' / 'models' / 'trained_model.keras'
-        meta_path  = Path.home() / 'ros_ws' / 'models' / 'training_metadata.json'
+        MODELS_DIR.mkdir(parents=True, exist_ok=True)
+        model_path = MODELS_DIR / 'trained_model.keras'
+        meta_path  = MODELS_DIR / 'training_metadata.json'
 
         if not force_fresh and os.path.exists(model_path):
             # ── Resume from checkpoint ─────────────────────────────────────────
@@ -205,7 +213,7 @@ class Trainer(Node):
         self.env_step_count   = 0
         self._drain_train_queue()
         self.recent_avg_reward = deque(maxlen=BEST_MODEL_WINDOW)
-        self.best_model_path  = Path.home() / 'ros_ws' / 'models' / 'best_model.keras'
+        self.best_model_path  = MODELS_DIR / 'best_model.keras'
 
         # Reset episode state (is_resetting managed by reset_done_callback)
         self.step_count       = 0
@@ -217,7 +225,7 @@ class Trainer(Node):
         self.state            = None
 
         # Open training CSV
-        csv_path    = Path.home() / 'ros_ws' / 'models' / 'training_log.csv'
+        csv_path    = MODELS_DIR / 'training_log.csv'
         file_exists = os.path.isfile(csv_path)
         self.csv_file   = open(csv_path, mode=mode, newline='')
         self.csv_writer = csv.writer(self.csv_file)
@@ -487,8 +495,8 @@ class Trainer(Node):
 
         # ── Periodic checkpoint every 50 episodes (for crash recovery) ─────────
         if self.epoch_count % 50 == 0:
-            ckpt_path = Path.home() / 'ros_ws' / 'models' / 'trained_model.keras'
-            meta_path = Path.home() / 'ros_ws' / 'models' / 'training_metadata.json'
+            ckpt_path = MODELS_DIR / 'trained_model.keras'
+            meta_path = MODELS_DIR / 'training_metadata.json'
             self.model.save(ckpt_path)
             with open(meta_path, 'w') as f:
                 json.dump({
@@ -523,8 +531,8 @@ class Trainer(Node):
 
     def _terminate_training(self):
         """Save final artefacts and shut down the simulation."""
-        final_path = Path.home() / 'ros_ws' / 'models' / 'trained_model_FINAL.keras'
-        meta_path  = Path.home() / 'ros_ws' / 'models' / 'training_metadata.json'
+        final_path = MODELS_DIR / 'trained_model_FINAL.keras'
+        meta_path  = MODELS_DIR / 'training_metadata.json'
 
         self.model.save(final_path)
         with open(meta_path, 'w') as f:

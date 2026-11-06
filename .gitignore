@@ -1,19 +1,23 @@
+# Python / virtualenv
 .venv/
+__pycache__/
+*.pyc
+
+# colcon build artefacts
 build/
 install/
 log/
+
+# Editor
 .vscode/
-src/lab03_pkg/
-src/lab04_pkg/
-src/lab05_pkg/
-src/py_srvcli/
-src/ros_tutorials/
-src/turtlebot3_perception/
-models/
-__pycache__/
-*.pyc
-paper.pdf
-paper_extra.pdf
-*.md
-plot_training.py
-src/turtlebot3_simulations
+
+# Training outputs (only the published best model is tracked)
+models/*
+!models/best_model.keras
+logs/
+
+# External dependency, cloned separately (see README)
+src/turtlebot3_simulations/
+
+# Windows download metadata
+*Zone.Identifier

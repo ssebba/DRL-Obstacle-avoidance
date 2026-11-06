@@ -25,7 +25,7 @@ class lidar_filter(Node):
         self.subscription = self.create_subscription(
             LaserScan, '/scan',self.scan_callback,qos_profile_sensor_data)
 
-        self.get_logger().info('Filtro dati lidar inizializzato')
+        self.get_logger().info('LiDAR data filter initialised')
         self.step_count = 0
     
     def scan_callback(self, msg: LaserScan):
@@ -35,15 +35,13 @@ class lidar_filter(Node):
         out_angles = Float32MultiArray()
         ranges = np.array(lidar_scan.ranges)
         
-        # 1. Remove NaN e Inf
-        #ranges[np.isnan(ranges)] = lidar_scan.range_min if lidar_scan.range_min > 0 else 0.01 # Assegna max per NaN  (prima era scan.range_max)
+        # 1. Replace NaN and Inf with the sensor max range
         ranges[np.isnan(ranges)] = lidar_scan.range_max
-        ranges[np.isinf(ranges)] = lidar_scan.range_max  # Assegna max per Inf
+        ranges[np.isinf(ranges)] = lidar_scan.range_max  
         
         # 2. Limit to max_range
         ranges[ranges > self.lidar_max_range] = self.lidar_max_range
-        # 3. Reduce ranges # from 270 to num_lidar_ranges
-        # Pick the minimum for each angular sector
+        # 3. Downsample to num_lidar_ranges evenly spaced beams
         total_ranges = len(ranges)
 
         idx = np.linspace(
@@ -66,63 +64,6 @@ class lidar_filter(Node):
         self.publisher_angles.publish(out_angles)
         self.step_count += 1
     
-
-    # def scan_callback(self, msg: LaserScan):
-    #     """Callback for LiDAR readings"""
-    #     lidar_scan = msg
-    #     out_data = Float32MultiArray()
-    #     ranges = np.array(lidar_scan.ranges)
-        
-    #     # 1. Remove NaN e Inf
-    #     #ranges[np.isnan(ranges)] = lidar_scan.range_min if lidar_scan.range_min > 0 else 0.01 # Assegna max per NaN  (prima era scan.range_max)
-    #     ranges[np.isnan(ranges)] = lidar_scan.range_max
-    #     ranges[np.isinf(ranges)] = lidar_scan.range_max  # Assegna max per Inf
-        
-    #     # 2. Limit to max_range
-    #     ranges[ranges > self.lidar_max_range] = self.lidar_max_range
-    #     # 3. Reduce ranges # from 270 to num_lidar_ranges
-    #     # Pick the minimum for each angular sector
-    #     total_ranges = len(ranges)
-    #     #indices = np.linspace(0, total_ranges - 1, self.num_lidar_ranges, dtype=int)
-    #     sector_size = total_ranges // self.num_lidar_ranges
-
-    #     filtered_ranges = np.zeros(self.num_lidar_ranges)
-    #     filtered_angles = np.zeros(self.num_lidar_ranges)
-        
-        
-    #     # for i in range(self.num_lidar_ranges):
-    #     #     start_idx = i * sector_size
-    #     #     end_idx = start_idx + sector_size if i < self.num_lidar_ranges - 1 else total_ranges
-    #     #     filtered_ranges[i] = np.min(ranges[start_idx:end_idx])
-
-    #     for i in range(self.num_lidar_ranges):
-    #         start_idx = i * sector_size
-    #         # Gestione dell'ultimo settore per coprire eventuali resti
-    #         end_idx = start_idx + sector_size if i < self.num_lidar_ranges - 1 else total_ranges
-            
-    #         # Extract the sector
-    #         sector = ranges[start_idx:end_idx]
-            
-    #         # Find the index related to the min value of the sector
-    #         min_relative_idx = np.argmin(sector)
-            
-    #         # Compute the absolute index in the original array
-    #         min_absolute_idx = start_idx + min_relative_idx
-            
-    #         # Save the min value
-    #         filtered_ranges[i] = sector[min_relative_idx]
-            
-    #         # Compute the exact angle using the absolute index
-    #         # angle = angle_min + index * angle_increment
-    #         filtered_angles[i] = lidar_scan.angle_min + min_absolute_idx * lidar_scan.angle_increment
-
-    #     out_data.data = [float(x) for x in filtered_ranges]
-    #     if self.step_count % 100 == 0:
-    #         self.step_count = 0
-    #         self.get_logger().info('I am publishing!')
-
-    #     self.publisher_scans.publish(out_data)
-    #     self.step_count += 1
 
 
 

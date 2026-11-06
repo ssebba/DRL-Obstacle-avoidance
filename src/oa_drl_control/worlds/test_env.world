@@ -6,33 +6,32 @@
       </ros>
     </plugin>
     
-    <!-- Luce del sole -->
+    <!-- Sun -->
     <include>
       <uri>model://sun</uri>
     </include>
 
-    <!-- Pavimento base -->
+    <!-- Ground plane -->
     <include>
       <uri>model://ground_plane</uri>
     </include>
 
-    <!-- Definizione diretta del tuo file .obj nel mondo -->
-    <model name="geometria_rampe_muri">
+    <!-- Environment geometry, loaded from the .obj mesh -->
+    <model name="environment_mesh">
       <pose>0 0 0 1.570796 0 0</pose>
       <static>true</static>
       <link name="link">
         
-        <!-- Fisica e collisioni per il LiDAR -->
+        <!-- Collision geometry, also seen by the LiDAR -->
         <collision name="collision">
           <geometry>
             <mesh>
-              <!-- Il comando file:// dice a Gazebo di cercare il .obj nella stessa cartella -->
               <uri>model://oa_drl_control/worlds/training_env.obj</uri>
             </mesh>
           </geometry>
         </collision>
 
-        <!-- Grafica visibile -->
+        <!-- Visual geometry -->
         <visual name="visual">
           <geometry>
             <mesh>

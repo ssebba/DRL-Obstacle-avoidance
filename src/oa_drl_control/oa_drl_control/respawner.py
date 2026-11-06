@@ -20,10 +20,10 @@ class Respawner(Node):
         self.declare_parameter('package_name', 'oa_drl_control')
         self.declare_parameter('world_file', 'training_env.world')
         self.declare_parameter('robot_name', 'burger')
-        # margin: distanza minima dai muri per il centro del robot [m]
-        # (deve essere >= collision_tolerance del trainer, di default 0.4 = 2x la tolleranza)
+        # margin: minimum distance between the robot centre and any wall [m]
+        # (must be >= the trainer collision tolerance; default 0.4 = 2x tolerance)
         self.declare_parameter('margin', 0.4)
-        # forward_clearance: spazio libero che deve esserci davanti al robot [m]
+        # forward_clearance: free space required in front of the robot [m]
         # Fisicamente: r_min = v_lin / omega_max = 0.2/0.8 = 0.25 m
         # Con collision_tolerance=0.2 m e safety buffer: 0.25 + 0.2 + 0.15 ≈ 0.6 m
         self.declare_parameter('forward_clearance', 0.6)
@@ -65,7 +65,9 @@ class Respawner(Node):
         self.reset_world_client = self.create_client(Empty, '/reset_world', callback_group=self.cb_group)
         self.srv = self.create_service(Trigger, '/randomize_robot_pose', self.handle_randomize_pose, callback_group=self.cb_group)
 
-        self.csv_filepath = Path.home() / "ros_ws" / "models" / "valid_poses.csv"
+        models_dir = Path(os.environ.get("OA_DRL_MODELS_DIR", Path.home() / "ros_ws" / "models"))
+        models_dir.mkdir(parents=True, exist_ok=True)
+        self.csv_filepath = models_dir / "valid_poses.csv"
         
         if not os.path.exists(self.csv_filepath):
             with open(self.csv_filepath, mode='w', newline='') as file:
@@ -181,7 +183,7 @@ class Respawner(Node):
                             
             self.get_logger().info(f'Caricati {len(walls)} ostacoli dal file .world')
         except Exception as e:
-            self.get_logger().error(f'Errore nel parsing del file .world: {e}')
+            self.get_logger().error(f'Error while parsing the .world file: {e}')
         return walls
 
     def yaw_to_quaternion(self, yaw):
@@ -270,9 +272,9 @@ class Respawner(Node):
         return True
 
     def _generate_valid_positions(self):
-        """Pre-calcola solo le posizioni (x,y) sicure rispetto ai muri (controllo margine).
-        L'angolo non viene incluso qui: verrà campionato casualmente al momento del respawn.
-        Questo produce molte più posizioni valide e angoli veramente continui."""
+        """Pre-compute only the (x, y) positions that are safe from walls (margin check).
+        The heading is not included here: it is sampled at respawn time.
+        This yields many more valid positions and truly continuous headings."""
         self.valid_positions = []
         res = 0.2
         margin = self.margin
@@ -294,10 +296,10 @@ class Respawner(Node):
             self.get_logger().warn("Nessuna posizione valida trovata! Uso posizione di default (0,0)")
             self.valid_positions.append((0.0, 0.0))
         else:
-            self.get_logger().info(f"Pre-calcolate {len(self.valid_positions)} posizioni valide sulla griglia.")
+            self.get_logger().info(f"Pre-computed {len(self.valid_positions)} valid grid positions.")
 
     def _is_position_safe(self, px, py, margin):
-        """Controlla solo che (px, py) sia dentro la mappa e lontana dai muri (no angolo)."""
+        """Check only that (px, py) lies inside the map and away from walls (heading ignored)."""
         if not (self.map_min_x < px < self.map_max_x and
                 self.map_min_y < py < self.map_max_y):
             return False
@@ -322,26 +324,26 @@ class Respawner(Node):
         self._generate_valid_positions()
 
     def get_random_safe_pose(self, margin=None, forward_clearance=None, max_angle_attempts=36):
-        """Sceglie una posizione valida a caso dalla lista pre-calcolata, poi campiona
-        un angolo casuale continuo che garantisce la forward clearance.
-        Se nessun angolo funziona per quella posizione, riprova con un'altra.
+        """Pick a random valid position from the pre-computed list, then sample
+        a continuous random heading that guarantees the forward clearance.
+        If no heading works for that position, retry with another one.
 
         Args:
-            margin: distanza minima dai muri [m]. None → usa il parametro ROS 'margin'.
-            forward_clearance: spazio libero frontale richiesto [m]. None → usa il parametro ROS 'forward_clearance'.
-            max_angle_attempts: quanti angoli casuali provare per ogni posizione.
+            margin: minimum distance from walls [m]. None -> use the 'margin' ROS parameter.
+            forward_clearance: required free space ahead [m]. None -> use the 'forward_clearance' ROS parameter.
+            max_angle_attempts: number of random headings to try per position.
         """
         if margin is None:
             margin = self.margin
         if forward_clearance is None:
             forward_clearance = self.forward_clearance
 
-        # Mescola la lista per non ciclare sempre nello stesso ordine
+        # Shuffle so positions are not always visited in the same order
         positions = list(self.valid_positions)
         random.shuffle(positions)
 
         for px, py in positions:
-            # Aggiungi un piccolo jitter alla posizione per uscire dalla griglia
+            # Add a small jitter so the pose is not locked to the sampling grid
             jitter = 0.05
             px += random.uniform(-jitter, jitter)
             py += random.uniform(-jitter, jitter)
@@ -365,25 +367,25 @@ class Respawner(Node):
         try:
             with open(self.csv_filepath, mode='a', newline='') as file:
                 writer = csv.writer(file)
-                # Arrotondiamo a 3 cifre decimali per mantenere il CSV pulito
+                # Round to 3 decimals to keep the CSV tidy
                 writer.writerow([f"{px:.3f}", f"{py:.3f}", f"{yaw:.3f}"])
         except Exception as e:
-            self.get_logger().error(f"Errore durante il salvataggio nel CSV: {e}")
+            self.get_logger().error(f"Error while writing the CSV: {e}")
 
-        # Prima di muovere il robot, resettiamo il mondo (velocità e pose).
-        # Questo garantisce che la velocità inerziale residua diventi esattamente zero.
+        # Reset the world (velocities and poses) before moving the robot,
+        # so that any residual inertial velocity becomes exactly zero.
         if self.reset_world_client.wait_for_service(timeout_sec=0.5):
             self.reset_world_client.call_async(Empty.Request())
         else:
-            self.get_logger().warn("Servizio /reset_world non disponibile. Salto il reset inerziale.")
+            self.get_logger().warn("Service /reset_world not available. Skipping the inertial reset.")
 
-        # Invia la richiesta a Gazebo tramite comando da terminale,
-        # aggirando il bug del servizio ROS 2 /set_entity_state in Humble
+        # Send the request to Gazebo through the command line,
+        # working around the ROS 2 Humble /set_entity_state service bug
         cmd = f"gz model -m {self.robot_name} -x {px:.3f} -y {py:.3f} -z 0.01 -R 0.0 -P 0.0 -Y {yaw:.3f}"
         os.system(cmd)
 
         response.success = True
-        response.message = f"Riposizionato in x:{px:.2f}, y:{py:.2f}"
+        response.message = f"Repositioned at x:{px:.2f}, y:{py:.2f}"
         return response
 
 def main(args=None):
